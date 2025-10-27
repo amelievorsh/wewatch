@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BODY_POSE_TRACKER - Gesture Detection</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.10.0/p5.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  <style>
+    :root {
+      --tracker-color: #a020f0;
+      --tracker-name: "BODY_POSE_TRACKER";
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Courier New', monospace;
+      background: #000;
+      color: var(--tracker-color);
+      overflow: hidden;
+    }
+
+    #overlay {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 1000;
+      background: rgba(0, 0, 0, 0.9);
+      padding: 20px;
+      border: 2px solid var(--tracker-color);
+      max-width: 400px;
+      font-size: 12px;
+    }
+
+    #status {
+      color: var(--tracker-color);
+      font-weight: bold;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+
+    .data-point {
+      font-size: 12px;
+      margin: 5px 0;
+      color: var(--tracker-color);
+    }
+
+    #gestureInfo {
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid var(--tracker-color);
+    }
+
+    .gesture-detected {
+      color: #0f0;
+      font-weight: bold;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    #sendStatus {
+      margin-top: 15px;
+      padding-top: 10px;
+      border-top: 1px solid var(--tracker-color);
+      font-size: 11px;
+      color: #888;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="status">● BODY_POSE_TRACKER - ACTIVE</div>
+    <div id="data">
+      <div class="data-point">BODIES DETECTED: 0</div>
+      <div class="data-point">KEYPOINTS: 0</div>
+    </div>
+    <div id="gestureInfo">
+      <div class="data-point">CURRENT GESTURES: None</div>
+      <div class="data-point">TOTAL DETECTED: 0</div>
+    </div>
+    <div id="sendStatus">Initializing storage...</div>
+  </div>
+
+  <script>
+    /* ============================================
+       CONFIGURATION
+       ============================================ */
+    const CONFIG = {
+      trackerName: 'BODY_POSE_TRACKER',
+      storageKey: 'body_pose_data',  // Shared storage key
+      sendInterval: 2000,            // Send gesture data every 2 seconds
+      maxBodies: 10,
+      lerpAmount: 0.3,
+      gestureConfidence: 0.2,
+      displayDuration: 1000
+    };
+
+    let sendCount = 0;
+
+    // Body pose variables
+    let video;
+    let bodyPose;
+    let poses = [];
+    let connections;
+    
+    // Smoothing with LERP
+    let smoothedPoses = [];
+    
+    // Gesture tracking
+    let gestureMessages = [];
+    let detectedGestures = new Set();
+    let totalGesturesDetected = 0;
+    let currentGestures = [];
+
+    /* ============================================
+       CROSS-DEVICE STORAGE FUNCTIONS
+       ============================================ */
+    
+    async function saveGestureData(data) {
+      try {
+        await window.storage.set(CONFIG.storageKey, JSON.stringify(data), true);
+        return true;
+      } catch (error) {
+        console.error('Storage error:', error);
+        return false;
+      }
+    }
+
+    /* ============================================
+       LERP SMOOTHING FUNCTIONS
+       ============================================ */
+    
+    function initSmoothPoses() {
+      smoothedPoses = poses.map(pose => {
+        return {
+          keypoints: pose.keypoints.map(kp => ({
+            x: kp.x,
+            y: kp.y,
+            confidence: kp.confidence,
+            name: kp.name
+          })),
+          id: pose.id || Math.random()
+        };
+      });
+    }
+
+    function updateSmoothPoses() {
+      if (smoothedPoses.length !== poses.length) {
+        initSmoothPoses();
+        return;
+      }
+
+      for (let i = 0; i < poses.length; i++) {
+        let pose = poses[i];
+        let smoothPose = smoothedPoses[i];
+        
+        for (let j = 0; j < pose.keypoints.length; j++) {
+          let kp = pose.keypoints[j];
+          let skp = smoothPose.keypoints[j];
+          
+          skp.x = lerp(skp.x, kp.x, CONFIG.lerpAmount);
+          skp.y = lerp(skp.y, kp.y, CONFIG.lerpAmount);
+          skp.confidence = kp.confidence;
+        }
+      }
+    }
+
+    /* ============================================
+       GESTURE DETECTION FUNCTIONS
+       ============================================ */
+    
+    function detectGestures(pose) {
+      let kp = name => pose.keypoints.find(k => k.name === name && k.confidence > CONFIG.gestureConfidence);
+      
+      let lw = kp("left_wrist");
+      let rw = kp("right_wrist");
+      let le = kp("left_elbow");
+      let re = kp("right_elbow");
+      let lk = kp("left_knee");
+      let rk = kp("right_knee");
+      let ls = kp("left_shoulder");
+      let rs = kp("right_shoulder");
+      let leye = kp("left_eye");
+      let reye = kp("right_eye");
+      let nose = kp("nose");
+
+      if (!nose) return [];
+
+      let gestures = [];
+
+      // G1: Hands together
+      if (lw && rw && dist(lw.x, lw.y, rw.x, rw.y) < 50) {
+        gestures.push("Hands_Together");
+      }
+
+      // G2: Right arm raised
+      if (rw && reye && rw.y < reye.y) {
+        gestures.push("Right_Arm_Raised");
+      }
+
+      // G3: Left arm raised
+      if (lw && leye && lw.y < leye.y) {
+        gestures.push("Left_Arm_Raised");
+      }
+
+      // G4: T-pose
+      if (lw && rw && ls && rs &&
+          abs(lw.y - ls.y) < 50 && abs(rw.y - rs.y) < 50 &&
+          abs(ls.y - rs.y) < 50) {
+        gestures.push("T_Pose");
+      }
+
+      // G5: Hands on knees
+      if (lw && rw && lk && rk &&
+          dist(lw.x, lw.y, lk.x, lk.y) < 60 &&
+          dist(rw.x, rw.y, rk.x, rk.y) < 60) {
+        gestures.push("Hands_On_Knees");
+      }
+
+      // G6: Arms crossed
+      if (le && rw && re && lw &&
+          dist(le.x, le.y, rw.x, rw.y) < 60 &&
+          dist(re.x, re.y, lw.x, lw.y) < 60) {
+        gestures.push("Arms_Crossed");
+      }
+
+      // G7: Both arms raised
+      if (lw && rw && leye && reye && lw.y < leye.y && rw.y < reye.y) {
+        gestures.push("Both_Arms_Raised");
+      }
+
+      for (let msg of gestures) {
+        gestureMessages.push({
+          message: msg.replace(/_/g, ' '),
+          x: nose.x,
+          y: nose.y,
+          timestamp: millis()
+        });
+        
+        detectedGestures.add(msg);
+      }
+
+      return gestures;
+    }
+
+    function detectAllGestures() {
+      currentGestures = [];
+      
+      for (let pose of smoothedPoses) {
+        let gestures = detectGestures(pose);
+        currentGestures.push(...gestures);
+      }
+    }
+
+    /* ============================================
+       DRAWING FUNCTIONS
+       ============================================ */
+    
+    function drawSkeleton(pose) {
+      // Draw keypoints
+      for (let kp of pose.keypoints) {
+        if (kp.confidence > CONFIG.gestureConfidence) {
+          fill(160, 32, 240);
+          noStroke();
+          circle(kp.x, kp.y, 10);
+        }
+      }
+
+      // Draw connections
+      for (let i = 0; i < connections.length; i++) {
+        let [aIndex, bIndex] = connections[i];
+        let a = pose.keypoints[aIndex];
+        let b = pose.keypoints[bIndex];
+        
+        if (a && b && a.confidence > 0.1 && b.confidence > 0.1) {
+          stroke(160, 32, 240);
+          strokeWeight(3);
+          line(a.x, a.y, b.x, b.y);
+        }
+      }
+    }
+
+    /* ============================================
+       DATA SENDING & UI UPDATE
+       ============================================ */
+    
+    async function sendGestureData() {
+      if (currentGestures.length === 0) {
+        document.getElementById('sendStatus').innerHTML = 
+          `⚠ Waiting for gesture detection...`;
+        return;
+      }
+
+      const gestureData = {
+        tracker: CONFIG.trackerName,
+        timestamp: Date.now(),
+        bodiesDetected: smoothedPoses.length,
+        gestures: currentGestures,
+        totalKeypoints: smoothedPoses.reduce((sum, pose) => 
+          sum + pose.keypoints.filter(kp => kp.confidence > CONFIG.gestureConfidence).length, 0),
+        gestureCount: currentGestures.length
+      };
+
+      const success = await saveGestureData(gestureData);
+
+      if (success) {
+        sendCount++;
+        totalGesturesDetected += currentGestures.length;
+        
+        document.getElementById('sendStatus').innerHTML = 
+          `✓ Sent ${sendCount} updates to shared storage<br>` +
+          `📡 Accessible on all devices`;
+        
+        console.log('📤 Saved gesture data to shared storage:', gestureData);
+      } else {
+        document.getElementById('sendStatus').innerHTML = 
+          `❌ Failed to save data`;
+      }
+    }
+
+    function updateUI() {
+      const dataDiv = document.getElementById('data');
+      const gestureDiv = document.getElementById('gestureInfo');
+      
+      dataDiv.innerHTML = `
+        <div class="data-point">BODIES DETECTED: ${smoothedPoses.length}</div>
+        <div class="data-point">KEYPOINTS: ${smoothedPoses.reduce((sum, pose) => 
+          sum + pose.keypoints.filter(kp => kp.confidence > CONFIG.gestureConfidence).length, 0)}</div>
+      `;
+
+      const gestureClass = currentGestures.length > 0 ? 'gesture-detected' : '';
+      const gestureList = currentGestures.length > 0 
+        ? currentGestures.map(g => g.replace(/_/g, ' ')).join(', ')
+        : 'None';
+      
+      gestureDiv.innerHTML = `
+        <div class="data-point ${gestureClass}">CURRENT GESTURES: ${gestureList}</div>
+        <div class="data-point">TOTAL DETECTED: ${totalGesturesDetected}</div>
+      `;
+    }
+
+    /* ============================================
+       P5.JS SETUP AND DRAW
+       ============================================ */
+    
+    function gotPoses(results) {
+      poses = results;
+    }
+
+    function preload() {
+      bodyPose = ml5.bodyPose('MoveNet', {
+        flipped: true,
+        maxPoseDetections: CONFIG.maxBodies,
+        modelType: "MULTIPOSE_LIGHTNING"
+      });
+    }
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      video = createCapture(VIDEO);
+      video.size(width, height);
+      video.hide();
+      
+      bodyPose.detectStart(video, gotPoses);
+      connections = bodyPose.getSkeleton();
+      
+      frameRate(60);
+      
+      console.log('🎥 BODY_POSE_TRACKER initialized with cross-device storage');
+      console.log(`📊 Max bodies: ${CONFIG.maxBodies}, LERP: ${CONFIG.lerpAmount}`);
+      
+      document.getElementById('sendStatus').innerHTML = 
+        `✓ Storage initialized - Data will sync across devices`;
+    }
+
+    function draw() {
+      background(0);
+      
+      updateSmoothPoses();
+      
+      for (let pose of smoothedPoses) {
+        drawSkeleton(pose);
+      }
+      
+      detectAllGestures();
+      
+      let now = millis();
+      for (let msg of gestureMessages) {
+        if (now < msg.timestamp + CONFIG.displayDuration) {
+          fill(160, 32, 240);
+          noStroke();
+          textSize(40);
+          textAlign(CENTER);
+          text(msg.message, msg.x, msg.y - 40);
+        }
+      }
+      
+      gestureMessages = gestureMessages.filter(m => now < m.timestamp + CONFIG.displayDuration);
+      
+      updateUI();
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+    }
+
+    // Send data at intervals
+    setInterval(() => {
+      sendGestureData();
+    }, CONFIG.sendInterval);
+  </script>
+</body>
+</html>
