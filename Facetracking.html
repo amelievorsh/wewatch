@@ -11,74 +11,28 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
   
   <style>
-    :root {
-      --tracker-color: #00ff64;
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    :root { --tracker-color: #00ff64; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Courier New', monospace;
       background: #000;
       color: var(--tracker-color);
       overflow: hidden;
     }
-
     #overlay {
-      position: fixed;
-      top: 20px;
-      left: 20px;
-      z-index: 1000;
+      position: fixed; top: 20px; left: 20px; z-index: 1000;
       background: rgba(0, 0, 0, 0.9);
-      padding: 20px;
-      border: 2px solid var(--tracker-color);
-      max-width: 400px;
-      font-size: 12px;
+      padding: 20px; border: 2px solid var(--tracker-color);
+      max-width: 400px; font-size: 12px;
     }
-
-    #status {
-      color: var(--tracker-color);
-      font-weight: bold;
-      margin-bottom: 10px;
-      font-size: 16px;
-    }
-
-    .data-point {
-      font-size: 12px;
-      margin: 5px 0;
-      color: var(--tracker-color);
-    }
-
-    #meshInfo {
-      margin-top: 15px;
-      padding-top: 15px;
-      border-top: 1px solid var(--tracker-color);
-    }
-
-    #sendStatus {
-      margin-top: 15px;
-      padding-top: 10px;
-      border-top: 1px solid var(--tracker-color);
-      font-size: 11px;
-      color: #888;
-    }
-
-    canvas {
-      display: block;
-    }
-
-    .active {
-      color: #0f0;
-      font-weight: bold;
-    }
-
+    #status { color: var(--tracker-color); font-weight: bold; margin-bottom: 10px; font-size: 16px; }
+    .data-point { font-size: 12px; margin: 5px 0; color: var(--tracker-color); }
+    #meshInfo { margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--tracker-color); }
+    #sendStatus { margin-top: 15px; padding-top: 10px; border-top: 1px solid var(--tracker-color); font-size: 11px; color: #888; }
+    canvas { display: block; }
+    .active { color: #0f0; font-weight: bold; }
     .firebase-status {
-      padding: 10px;
-      margin-bottom: 15px;
+      padding: 10px; margin-bottom: 15px;
       border: 1px solid var(--tracker-color);
       background: rgba(0, 255, 100, 0.1);
     }
@@ -94,7 +48,8 @@
     <div id="status">● FACE_MESH_TRACKER - ACTIVE</div>
     <div id="data">
       <div class="data-point">FACES DETECTED: 0</div>
-      <div class="data-point">KEYPOINTS: 0</div>
+      <div class="data-point">EXPRESSION: None Detected</div>
+      <div class="data-point">CONFIDENCE: 0.0%</div>
     </div>
     <div id="meshInfo">
       <div class="data-point">TRIANGLES: 0</div>
@@ -106,7 +61,6 @@
   </div>
 
   <script>
-    // Firebase Configuration
     const firebaseConfig = {
       apiKey: "AIzaSyC9T0hhAF8KDWRIQZsiBdneslvx3mlgYU4",
       authDomain: "buffer02-40ffe.firebaseapp.com",
@@ -118,227 +72,216 @@
       measurementId: "G-ZTJW8P42SP"
     };
 
-    const CONFIG = {
-      trackerName: 'FACE_MESH_TRACKER',
-      sendInterval: 1000,
-      amplitude: 35,
-      frequency: 1.2
+    const CONFIG = { 
+      trackerName: 'FACE_MESH_TRACKER', 
+      sendInterval: 1500,
+      amplitude: 35, 
+      frequency: 1.2,
+      videoScale: 1.5
+    };
+    
+    const EXPRESSION_CONFIG = {
+      mouthOpenThreshold: 12,
+      mouthClosedThreshold: 8,
+      tiltThreshold: 1.5,
+      smileThreshold: 3,
+      browRaiseThreshold: 5,
+      minSendConfidence: 0.15
     };
 
-    let sendCount = 0;
-    let database;
-    let firebaseConnected = false;
-
-    // Initialize Firebase
+    let sendCount = 0, database, firebaseConnected = false;
+    let lastSendTime = 0;
+    let isSending = false;
+    
     try {
       firebase.initializeApp(firebaseConfig);
       database = firebase.database();
-      
-      // Check connection
       const connectedRef = database.ref('.info/connected');
       connectedRef.on('value', (snap) => {
         if (snap.val() === true) {
           firebaseConnected = true;
           document.getElementById('firebaseStatus').innerHTML = '✓ Connected to Firebase';
           document.getElementById('sendStatus').innerHTML = '✓ Ready to send data';
-          console.log('✓ Firebase connected');
         } else {
           firebaseConnected = false;
           document.getElementById('firebaseStatus').innerHTML = '✗ Disconnected';
-          console.log('✗ Firebase disconnected');
         }
       });
     } catch (error) {
       console.error('Firebase initialization error:', error);
       document.getElementById('firebaseStatus').innerHTML = '✗ Configuration Error';
-      document.getElementById('sendStatus').innerHTML = '❌ Firebase error';
+      document.getElementById('sendStatus').innerHTML = '✖ Firebase error';
     }
 
-    // Face Mesh variables
-    let video;
-    let faceMesh;
-    let faces = [];
-    let triangles;
-    let t = 0;
+    let video, faceMesh, faces = [], triangles, t = 0;
 
-    async function sendMeshData() {
-      if (!firebaseConnected) {
-        document.getElementById('sendStatus').innerHTML = 
-          `⚠ Waiting for Firebase connection...`;
-        return;
-      }
-
-      const meshData = calculateMeshMetrics();
+    function detectExpressions(face) {
+      if (!face || !face.keypoints) return [];
+      const k = face.keypoints;
       
-      if (!meshData) {
-        document.getElementById('sendStatus').innerHTML = 
-          `⚠ Waiting for face detection...`;
-        return;
+      const upperLip = k[13];
+      const lowerLip = k[14];
+      const leftEye = k[33];
+      const rightEye = k[263];
+      const leftMouthCorner = k[61];
+      const rightMouthCorner = k[291];
+      const leftBrowMid = k[105];
+      const rightBrowMid = k[334];
+      const leftEyeCenter = k[159];
+      const rightEyeCenter = k[386];
+      
+      if (!upperLip || !lowerLip || !leftEye || !rightEye || !leftMouthCorner || !rightMouthCorner || !leftBrowMid || !rightBrowMid || !leftEyeCenter || !rightEyeCenter) return [];
+
+      const expressions = [];
+      
+      const mouthDist = dist(upperLip.x, upperLip.y, lowerLip.x, lowerLip.y);
+      
+      if (mouthDist > EXPRESSION_CONFIG.mouthOpenThreshold) {
+        const confidence = Math.min(1.0, (mouthDist - EXPRESSION_CONFIG.mouthOpenThreshold) / 30);
+        expressions.push({ expression: "mouth_open", confidence: confidence });
+      }
+      
+      if (mouthDist < EXPRESSION_CONFIG.mouthClosedThreshold) {
+        const confidence = Math.min(1.0, (EXPRESSION_CONFIG.mouthClosedThreshold - mouthDist) / 8);
+        expressions.push({ expression: "mouth_closed", confidence: confidence });
       }
 
-      try {
-        // *** THIS IS THE ONLY CHANGED LINE ***
-        await database.ref('data/face_mesh_data').set(meshData);
-        
-        sendCount++;
-        document.getElementById('sendStatus').innerHTML = 
-          `✓ Sent ${sendCount} updates to Firebase<br>` +
-          `📡 Data synced across all devices`;
-        
-        console.log('📤 Sent to Firebase:', meshData);
-      } catch (error) {
-        console.error('Firebase write error:', error);
-        document.getElementById('sendStatus').innerHTML = 
-          `❌ Error: ${error.message}`;
+      const tiltDiff = leftEye.y - rightEye.y;
+      if (Math.abs(tiltDiff) > EXPRESSION_CONFIG.tiltThreshold) {
+        const confidence = Math.min(1.0, Math.abs(tiltDiff) / 15);
+        if (tiltDiff > 0) {
+          expressions.push({ expression: "head_tilt_right", confidence: confidence });
+        } else {
+          expressions.push({ expression: "head_tilt_left", confidence: confidence });
+        }
       }
+
+      const mouthCenterY = (leftMouthCorner.y + rightMouthCorner.y) / 2;
+      const smileDiff = mouthCenterY - lowerLip.y;
+      if (smileDiff > EXPRESSION_CONFIG.smileThreshold) {
+        const confidence = Math.min(1.0, smileDiff / 15);
+        expressions.push({ expression: "smiling", confidence: confidence });
+      }
+
+      const browYAvg = (leftBrowMid.y + rightBrowMid.y) / 2;
+      const eyeYAvg = (leftEyeCenter.y + rightEyeCenter.y) / 2;
+      const browDiff = eyeYAvg - browYAvg;
+      if (browDiff > EXPRESSION_CONFIG.browRaiseThreshold) {
+        const confidence = Math.min(1.0, browDiff / 20);
+        expressions.push({ expression: "eyebrows_raised", confidence: confidence });
+      }
+
+      if (expressions.length === 0) {
+        expressions.push({ expression: "neutral", confidence: 0.5 });
+      }
+
+      return expressions.sort((a, b) => b.confidence - a.confidence);
     }
 
-    function calculateMeshMetrics() {
-      if (faces.length === 0) return null;
-
-      let face = faces[0];
-      let keypoints = face.keypoints;
-
-      let centerX = 0, centerY = 0;
-      for (let kp of keypoints) {
-        centerX += kp.x;
-        centerY += kp.y;
+    async function sendExpressionData(expression, confidence) {
+      if (!firebaseConnected || isSending) {
+        return;
       }
-      centerX /= keypoints.length;
-      centerY /= keypoints.length;
-
-      let avgDistance = 0;
-      for (let kp of keypoints) {
-        avgDistance += dist(kp.x, kp.y, centerX, centerY);
+      
+      const now = millis();
+      if (now - lastSendTime < CONFIG.sendInterval) {
+        return;
       }
-      avgDistance /= keypoints.length;
-
-      let noseTip = keypoints[1];
-      let leftEye = keypoints[33];
-      let rightEye = keypoints[263];
-      let mouth = keypoints[13];
-
-      return {
+      
+      isSending = true;
+      
+      const data = {
         tracker: CONFIG.trackerName,
         timestamp: Date.now(),
-        facesDetected: faces.length,
-        keypoints: keypoints.length,
-        triangles: triangles.length,
-        animationTime: t.toFixed(2),
-        faceCenter: {
-          x: centerX.toFixed(2),
-          y: centerY.toFixed(2)
-        },
-        faceSize: avgDistance.toFixed(2),
-        noseTip: {
-          x: noseTip.x.toFixed(2),
-          y: noseTip.y.toFixed(2)
-        },
-        eyeCenter: {
-          x: ((leftEye.x + rightEye.x) / 2).toFixed(2),
-          y: ((leftEye.y + rightEye.y) / 2).toFixed(2)
-        },
-        mouthPosition: {
-          x: mouth.x.toFixed(2),
-          y: mouth.y.toFixed(2)
-        }
+        expression: expression,
+        confidence: confidence
       };
-    }
 
-    function updateUI() {
-      const dataDiv = document.getElementById('data');
-      const meshDiv = document.getElementById('meshInfo');
-      
-      if (faces.length > 0) {
-        let face = faces[0];
-        
-        dataDiv.innerHTML = `
-          <div class="data-point active">FACES DETECTED: ${faces.length}</div>
-          <div class="data-point">KEYPOINTS: ${face.keypoints.length}</div>
-        `;
-
-        meshDiv.innerHTML = `
-          <div class="data-point">TRIANGLES: ${triangles.length}</div>
-          <div class="data-point">ANIMATION TIME: ${t.toFixed(2)}s</div>
-          <div class="data-point">AMPLITUDE: ${CONFIG.amplitude}px</div>
-          <div class="data-point">FREQUENCY: ${CONFIG.frequency}</div>
-        `;
-      } else {
-        dataDiv.innerHTML = `
-          <div class="data-point">FACES DETECTED: 0</div>
-          <div class="data-point">KEYPOINTS: 0</div>
-        `;
-
-        meshDiv.innerHTML = `
-          <div class="data-point">TRIANGLES: ${triangles ? triangles.length : 0}</div>
-          <div class="data-point">ANIMATION TIME: ${t.toFixed(2)}s</div>
-          <div class="data-point">AMPLITUDE: ${CONFIG.amplitude}px</div>
-          <div class="data-point">FREQUENCY: ${CONFIG.frequency}</div>
-        `;
+      try {
+        await database.ref('data/face_mesh_data').set(data);
+        sendCount++;
+        lastSendTime = now;
+        document.getElementById('sendStatus').innerHTML =
+          `✓ Sent ${sendCount} updates<br>${expression.toUpperCase().replace(/_/g, ' ')} (${(confidence * 100).toFixed(1)}%)`;
+      } catch (error) {
+        console.error('Firebase write error:', error);
+        document.getElementById('sendStatus').innerHTML = `✖ Error: ${error.message}`;
+      } finally {
+        isSending = false;
       }
     }
 
-    function gotFaces(results) {
-      faces = results;
+    function updateUI(detectedExpressions) {
+      const dataDiv = document.getElementById('data');
+      const meshDiv = document.getElementById('meshInfo');
+      const primary = detectedExpressions[0] || null;
+      const expressionText = primary ? primary.expression.replace(/_/g, ' ') : 'None Detected';
+      const confidenceText = primary ? (primary.confidence * 100).toFixed(1) + '%' : '0.0%';
+      const activeClass = primary && primary.confidence >= EXPRESSION_CONFIG.minSendConfidence ? 'active' : '';
+
+      dataDiv.innerHTML = `
+        <div class="data-point ${activeClass}">FACES DETECTED: ${faces.length}</div>
+        <div class="data-point">EXPRESSION: ${expressionText.toUpperCase()}</div>
+        <div class="data-point">CONFIDENCE: ${confidenceText}</div>
+      `;
+      meshDiv.innerHTML = `
+        <div class="data-point">TRIANGLES: ${triangles ? triangles.length : 0}</div>
+        <div class="data-point">ANIMATION TIME: ${t.toFixed(2)}s</div>
+        <div class="data-point">AMPLITUDE: ${CONFIG.amplitude}px</div>
+        <div class="data-point">FREQUENCY: ${CONFIG.frequency}</div>
+      `;
     }
 
-    function preload() {
-      faceMesh = ml5.faceMesh({ maxFaces: 1, flipped: true });
-    }
-
+    function gotFaces(results) { faces = results; }
+    function preload() { faceMesh = ml5.faceMesh({ maxFaces: 1, flipped: true }); }
     function setup() {
       createCanvas(windowWidth, windowHeight);
       video = createCapture(VIDEO, { flipped: true });
-      video.size(windowWidth, windowHeight);
+      video.size(windowWidth * CONFIG.videoScale, windowHeight * CONFIG.videoScale);
       video.hide();
-      
       faceMesh.detectStart(video, gotFaces);
       triangles = faceMesh.getTriangles();
-
       console.log('🎥 FACE_MESH_TRACKER initialized with Firebase');
     }
 
     function draw() {
       background(0);
-      video.loadPixels();
+      push();
+      translate(width / 2, height / 2);
+      scale(CONFIG.videoScale);
+      translate(-width / 2, -height / 2);
       
+      let currentExpressions = [];
+
       if (faces.length > 0) {
-        let face = faces[0];
+        const face = faces[0];
+        currentExpressions = detectExpressions(face);
+
+        const filtered = currentExpressions.filter(e => e.confidence >= EXPRESSION_CONFIG.minSendConfidence);
         
+        if (filtered.length > 0) {
+          const primary = filtered[0];
+          sendExpressionData(primary.expression, primary.confidence);
+        }
+
         beginShape(TRIANGLES);
         noFill();
         stroke(0, 255, 100, 180);
         strokeWeight(1);
-        
         for (let i = 0; i < triangles.length; i++) {
-          let tri = triangles[i];
-          let [a, b, c] = tri;
-          
-          let pointA = face.keypoints[a];
-          let pointB = face.keypoints[b];
-          let pointC = face.keypoints[c];
-          
-          let amp = CONFIG.amplitude;
-          let freq = CONFIG.frequency;
-          let ax = pointA.x + sin(t + i * freq) * amp / PI;
-          let ay = pointA.y;
-          
-          vertex(ax, ay);
-          vertex(pointB.x, pointB.y);
-          vertex(pointC.x, pointC.y);
+          const tri = triangles[i];
+          const [a, b, c] = tri;
+          const A = face.keypoints[a], B = face.keypoints[b], C = face.keypoints[c];
+          const ax = A.x + sin(t + i * CONFIG.frequency) * CONFIG.amplitude / PI;
+          vertex(ax, A.y); vertex(B.x, B.y); vertex(C.x, C.y);
         }
-        
         endShape();
-        
         t += 0.03;
       }
-
-      updateUI();
+      
+      pop();
+      updateUI(currentExpressions);
     }
-
-    setInterval(() => {
-      sendMeshData();
-    }, CONFIG.sendInterval);
   </script>
 </body>
 </html>
